@@ -181,11 +181,16 @@ DBImpl::~DBImpl() {
 Status DBImpl::NewDB() {
   VersionEdit new_db;
   new_db.SetComparatorName(user_comparator()->Name());
+  // 设置WAL编号: 也就是说WAL log把编号0占用了
   new_db.SetLogNumber(0);
+  //接下来新的文件会使用编号2
   new_db.SetNextFile(2);
+  // 用户提交key/value时的编号
   new_db.SetLastSequence(0);
-
+  // manifest文件的编号，这里新生成的DB里面把1占用掉了。
   const std::string manifest = DescriptorFileName(dbname_, 1);
+
+  //利用WAL日志文件将new_db这个版本编辑器dump到版本WAL日志manifest文件中
   WritableFile* file;
   Status s = env_->NewWritableFile(manifest, &file);
   if (!s.ok()) {
@@ -204,6 +209,7 @@ Status DBImpl::NewDB() {
     }
   }
   delete file;
+  //更新CURRENT文件
   if (s.ok()) {
     // Make "CURRENT" file that points to the new manifest file.
     s = SetCurrentFile(env_, dbname_, 1);
@@ -292,17 +298,26 @@ void DBImpl::RemoveObsoleteFiles() {
 Status DBImpl::Recover(VersionEdit* edit, bool* save_manifest) {
   mutex_.AssertHeld();
 
+  // 1.创建目录
   // Ignore error from CreateDir since the creation of the DB is
   // committed only when the descriptor is created, and this directory
   // may already exist from a previous failed creation attempt.
+  // 这里直接忽略CreateDir失败的情况。因为DB的创建只会在描述符被创建之后
+  // 再进行提交，并且这个目录有可能是上次创建DB失败之后留下来的。
   env_->CreateDir(dbname_);
   assert(db_lock_ == nullptr);
+
+  // 2.创建文件锁
   Status s = env_->LockFile(LockFileName(dbname_), &db_lock_);
+  // 如果失败，或者已经被上锁，说明已经有人在使用DB了，直接退出
   if (!s.ok()) {
     return s;
   }
 
+  // 3.创建DB
+  // 如果DB目录里面的CURRENT文件不存在
   if (!env_->FileExists(CurrentFileName(dbname_))) {
+    // 如果不存在的时候，需要创建DB
     if (options_.create_if_missing) {
       Log(options_.info_log, "Creating DB %s since it was missing.",
           dbname_.c_str());
@@ -315,18 +330,23 @@ Status DBImpl::Recover(VersionEdit* edit, bool* save_manifest) {
           dbname_, "does not exist (create_if_missing is false)");
     }
   } else {
+    // 如果CURRENT文件已经存在，说明DB已经存在
+    // 根据option来决定是否要报错
     if (options_.error_if_exists) {
       return Status::InvalidArgument(dbname_,
                                      "exists (error_if_exists is true)");
     }
   }
 
+  // 4.执行recover 
   s = versions_->Recover(save_manifest);
   if (!s.ok()) {
     return s;
   }
   SequenceNumber max_sequence(0);
 
+  // 5.从那些未注册的log中还原数据（即系统crash后，从log文件中恢复数据）
+  
   // Recover from all newer log files than the ones named in the
   // descriptor (new log files may have been added by the previous
   // incarnation without registering them in the descriptor).
@@ -334,22 +354,31 @@ Status DBImpl::Recover(VersionEdit* edit, bool* save_manifest) {
   // Note that PrevLogNumber() is no longer used, but we pay
   // attention to it in case we are recovering a database
   // produced by an older version of leveldb.
+
+  // 正常系统环境下的最小log号，所有异常环境下（crash）的log号都比这个大
   const uint64_t min_log = versions_->LogNumber();
   const uint64_t prev_log = versions_->PrevLogNumber();
+
+  // 获取所有数据库文件名
   std::vector<std::string> filenames;
-  s = env_->GetChildren(dbname_, &filenames);
+  s = env_->GetChildren(dbname_, &filenames); 
   if (!s.ok()) {
     return s;
   }
+
+  // 加入所有版本中的sstable文件number（到这里还只有一个版本）
   std::set<uint64_t> expected;
   versions_->AddLiveFiles(&expected);
+
   uint64_t number;
   FileType type;
+  // logs保存需要执行恢复的log文件名
   std::vector<uint64_t> logs;
   for (size_t i = 0; i < filenames.size(); i++) {
     if (ParseFileName(filenames[i], &number, &type)) {
       expected.erase(number);
       if (type == kLogFile && ((number >= min_log) || (number == prev_log)))
+        // 得到需要执行恢复的log文件
         logs.push_back(number);
     }
   }
@@ -363,6 +392,7 @@ Status DBImpl::Recover(VersionEdit* edit, bool* save_manifest) {
   // Recover in the order in which the logs were generated
   std::sort(logs.begin(), logs.end());
   for (size_t i = 0; i < logs.size(); i++) {
+    // 正式从log中恢复数据
     s = RecoverLogFile(logs[i], (i == logs.size() - 1), save_manifest, edit,
                        &max_sequence);
     if (!s.ok()) {
@@ -452,6 +482,7 @@ Status DBImpl::RecoverLogFile(uint64_t log_number, bool last_log,
       *max_sequence = last_seq;
     }
 
+    // memtable满， 需要执行compaction
     if (mem->ApproximateMemoryUsage() > options_.write_buffer_size) {
       compactions++;
       *save_manifest = true;
@@ -1198,11 +1229,13 @@ Status DBImpl::Delete(const WriteOptions& options, const Slice& key) {
 }
 
 Status DBImpl::Write(const WriteOptions& options, WriteBatch* updates) {
+  // 对于一次写，都将其封装成一个Writer
   Writer w(&mutex_);
   w.batch = updates;
   w.sync = options.sync;
   w.done = false;
 
+  // 加入写队列
   MutexLock l(&mutex_);
   writers_.push_back(&w);
   while (!w.done && &w != writers_.front()) {
@@ -1212,11 +1245,15 @@ Status DBImpl::Write(const WriteOptions& options, WriteBatch* updates) {
     return w.status;
   }
 
+  // 首先要制作出空余空间来写入
   // May temporarily unlock and wait.
   Status status = MakeRoomForWrite(updates == nullptr);
+  
   uint64_t last_sequence = versions_->LastSequence();
   Writer* last_writer = &w;
   if (status.ok() && updates != nullptr) {  // nullptr batch is for compactions
+    
+    //创建WriteBatch
     WriteBatch* write_batch = BuildBatchGroup(&last_writer);
     WriteBatchInternal::SetSequence(write_batch, last_sequence + 1);
     last_sequence += WriteBatchInternal::Count(write_batch);
@@ -1227,6 +1264,8 @@ Status DBImpl::Write(const WriteOptions& options, WriteBatch* updates) {
     // into mem_.
     {
       mutex_.Unlock();
+
+      //添加log
       status = log_->AddRecord(WriteBatchInternal::Contents(write_batch));
       bool sync_error = false;
       if (status.ok() && options.sync) {
@@ -1235,6 +1274,8 @@ Status DBImpl::Write(const WriteOptions& options, WriteBatch* updates) {
           sync_error = true;
         }
       }
+
+      //插入到memtable
       if (status.ok()) {
         status = WriteBatchInternal::InsertInto(write_batch, mem_);
       }
@@ -1248,9 +1289,11 @@ Status DBImpl::Write(const WriteOptions& options, WriteBatch* updates) {
     }
     if (write_batch == tmp_batch_) tmp_batch_->Clear();
 
+    // 更新versions的sequence number
     versions_->SetLastSequence(last_sequence);
   }
 
+  // 把 front <--> last_write 逐渐的所有writer全部剔除，先设置done=true,再唤醒
   while (true) {
     Writer* ready = writers_.front();
     writers_.pop_front();
@@ -1262,6 +1305,7 @@ Status DBImpl::Write(const WriteOptions& options, WriteBatch* updates) {
     if (ready == last_writer) break;
   }
 
+  // 唤醒新的Writer来写
   // Notify new head of write queue
   if (!writers_.empty()) {
     writers_.front()->cv.Signal();
@@ -1281,6 +1325,7 @@ WriteBatch* DBImpl::BuildBatchGroup(Writer** last_writer) {
 
   size_t size = WriteBatchInternal::ByteSize(first->batch);
 
+  // 最大size初始化
   // Allow the group to grow up to a maximum size, but if the
   // original write is small, limit the growth so we do not slow
   // down the small write too much.
@@ -1289,6 +1334,7 @@ WriteBatch* DBImpl::BuildBatchGroup(Writer** last_writer) {
     max_size = size + (128 << 10);
   }
 
+  // 遍历所有writer
   *last_writer = first;
   std::deque<Writer*>::iterator iter = writers_.begin();
   ++iter;  // Advance past "first"
@@ -1308,6 +1354,7 @@ WriteBatch* DBImpl::BuildBatchGroup(Writer** last_writer) {
 
       // Append to *result
       if (result == first->batch) {
+        // 切换到临时的batch，避免扰乱原writer中的batch
         // Switch to temporary batch instead of disturbing caller's batch
         result = tmp_batch_;
         assert(WriteBatchInternal::Count(result) == 0);
@@ -1315,6 +1362,8 @@ WriteBatch* DBImpl::BuildBatchGroup(Writer** last_writer) {
       }
       WriteBatchInternal::Append(result, w->batch);
     }
+
+     // 设置last_writer指针
     *last_writer = w;
   }
   return result;
@@ -1334,6 +1383,7 @@ Status DBImpl::MakeRoomForWrite(bool force) {
       break;
     } else if (allow_delay && versions_->NumLevelFiles(0) >=
                                   config::kL0_SlowdownWritesTrigger) {
+      // 允许当前写延迟，并且level0的个数达到软限制个数
       // We are getting close to hitting a hard limit on the number of
       // L0 files.  Rather than delaying a single write by several
       // seconds when we hit the hard limit, start delaying each
@@ -1341,23 +1391,29 @@ Status DBImpl::MakeRoomForWrite(bool force) {
       // this delay hands over some CPU to the compaction thread in
       // case it is sharing the same core as the writer.
       mutex_.Unlock();
+      // 让写延迟1ms，休眠期间，让出cpu给compaction thread，
+      //并且不与compaction thread竞争
       env_->SleepForMicroseconds(1000);
       allow_delay = false;  // Do not delay a single write more than once
       mutex_.Lock();
     } else if (!force &&
                (mem_->ApproximateMemoryUsage() <= options_.write_buffer_size)) {
+      //有足够的空间
       // There is room in current memtable
       break;
     } else if (imm_ != nullptr) {
+      // memtable满，等待compactoin
       // We have filled up the current memtable, but the previous
       // one is still being compacted, so we wait.
       Log(options_.info_log, "Current memtable full; waiting...\n");
       background_work_finished_signal_.Wait();
     } else if (versions_->NumLevelFiles(0) >= config::kL0_StopWritesTrigger) {
+      // 达到最大L0数（12），卡死后序线程，直到Compaction完成
       // There are too many level-0 files.
       Log(options_.info_log, "Too many L0 files; waiting...\n");
       background_work_finished_signal_.Wait();
     } else {
+      // 强制将mem_转为imm_, 强制生成新的log_
       // Attempt to switch to a new memtable and trigger compaction of old
       assert(versions_->PrevLogNumber() == 0);
       uint64_t new_log_number = versions_->NewFileNumber();
@@ -1482,13 +1538,17 @@ DB::~DB() = default;
 
 Status DB::Open(const Options& options, const std::string& dbname, DB** dbptr) {
   *dbptr = nullptr;
-
+  // DBImpl构造函数
   DBImpl* impl = new DBImpl(options, dbname);
   impl->mutex_.Lock();
   VersionEdit edit;
+  
+  //恢复阶段
   // Recover handles create_if_missing, error_if_exists
   bool save_manifest = false;
   Status s = impl->Recover(&edit, &save_manifest);
+
+  // 创建log file和memtable
   if (s.ok() && impl->mem_ == nullptr) {
     // Create new log and a corresponding memtable.
     uint64_t new_log_number = impl->versions_->NewFileNumber();
@@ -1504,16 +1564,21 @@ Status DB::Open(const Options& options, const std::string& dbname, DB** dbptr) {
       impl->mem_->Ref();
     }
   }
+
+  // 应用从recovery过程中生成version edit
   if (s.ok() && save_manifest) {
     edit.SetPrevLogNumber(0);  // No older logs needed after recovery.
     edit.SetLogNumber(impl->logfile_number_);
     s = impl->versions_->LogAndApply(&edit, &impl->mutex_);
   }
+
+  //移除废旧文件
   if (s.ok()) {
     impl->RemoveObsoleteFiles();
     impl->MaybeScheduleCompaction();
   }
   impl->mutex_.Unlock();
+
   if (s.ok()) {
     assert(impl->mem_ != nullptr);
     *dbptr = impl;
