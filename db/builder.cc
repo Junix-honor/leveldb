@@ -28,17 +28,24 @@ Status BuildTable(const std::string& dbname, Env* env, const Options& options,
       return s;
     }
 
+    // 新建sstable
     TableBuilder* builder = new TableBuilder(options, file);
+    // 因为跳表是有序的，所以第一个key肯定是最小的
     meta->smallest.DecodeFrom(iter->key());
+
+    // 向sstable中添加key value。
     Slice key;
     for (; iter->Valid(); iter->Next()) {
       key = iter->key();
       builder->Add(key, iter->value());
     }
+
+    // 同理，最后一个key是最大的
     if (!key.empty()) {
       meta->largest.DecodeFrom(key);
     }
-
+    
+    // 写入sstable中的其他块，index block, meta block ,meta index block footer等
     // Finish and check for builder errors
     s = builder->Finish();
     if (s.ok()) {

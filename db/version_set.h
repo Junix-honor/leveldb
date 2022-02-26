@@ -251,6 +251,7 @@ class VersionSet {
   // Returns true iff some level needs a compaction.
   bool NeedsCompaction() const {
     Version* v = current_;
+    //分为了两种情况，根据 compaction_score 和根据 filte_compact
     return (v->compaction_score_ >= 1) || (v->file_to_compact_ != nullptr);
   }
 
@@ -381,6 +382,9 @@ class Compaction {
 
   // State for implementing IsBaseLevelForKey
 
+  //用于优化IsBaseLevelForKey性能的，因为调用IsBaseLevelForKey的key都是递增的
+  //所以没有必要每次都从各层的第一个文件检查
+  
   // level_ptrs_ holds indices into input_version_->levels_: our state
   // is that we are positioned at one of the file ranges for each
   // higher level than the ones involved in this compaction (i.e. for
