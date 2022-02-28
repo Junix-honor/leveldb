@@ -30,13 +30,16 @@ else (WIN32)
   set(LEVELDB_PLATFORM_NAME LEVELDB_PLATFORM_POSIX)
 endif (WIN32)
 
+# option 选项，让你可以根据选项值进行条件编译
 option(LEVELDB_BUILD_TESTS "Build LevelDB's unit tests" ON)
 option(LEVELDB_BUILD_BENCHMARKS "Build LevelDB's benchmarks" ON)
 option(LEVELDB_INSTALL "Install LevelDB's header and library" ON)
 
+# CHECK_INCLUDE_FILE(<include> <variable> [<flags>])
 include(CheckIncludeFile)
 check_include_file("unistd.h" HAVE_UNISTD_H)
 
+# CHECK_LIBRARY_EXISTS(LIBRARY FUNCTION LOCATION VARIABLE)
 include(CheckLibraryExists)
 check_library_exists(crc32c crc32c_value "" HAVE_CRC32C)
 check_library_exists(snappy snappy_compress "" HAVE_SNAPPY)
@@ -116,7 +119,10 @@ endif(BUILD_SHARED_LIBS)
 # Must be included before CMAKE_INSTALL_INCLUDEDIR is used.
 include(GNUInstallDirs)
 
+# 指定要生成的库为leveldb
 add_library(leveldb "")
+
+# 指定生成leveldb需要的源文件
 target_sources(leveldb
   PRIVATE
     "${PROJECT_BINARY_DIR}/${LEVELDB_PORT_CONFIG_DIR}/port_config.h"
@@ -190,6 +196,8 @@ target_sources(leveldb
     "util/random.h"
     "util/status.cc"
 
+  # Generator expressions 
+  # https://cmake.org/cmake/help/latest/manual/cmake-generator-expressions.7.html?highlight=version_greater
   # Only CMake 3.3+ supports PUBLIC sources in targets exported by "install".
   $<$<VERSION_GREATER:CMAKE_VERSION,3.2>:PUBLIC>
     "${LEVELDB_PUBLIC_INCLUDE_DIR}/c.h"
@@ -209,6 +217,7 @@ target_sources(leveldb
     "${LEVELDB_PUBLIC_INCLUDE_DIR}/write_batch.h"
 )
 
+# 指定生成leveldb需要的源文件
 if (WIN32)
   target_sources(leveldb
     PRIVATE
@@ -223,6 +232,7 @@ else (WIN32)
   )
 endif (WIN32)
 
+# 指定生成leveldb需要的源文件
 # MemEnv is not part of the interface and could be pulled to a separate library.
 target_sources(leveldb
   PRIVATE
@@ -230,15 +240,18 @@ target_sources(leveldb
     "helpers/memenv/memenv.h"
 )
 
+# 指定生成leveldb需要的头文件
 target_include_directories(leveldb
   PUBLIC
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
 
+# 该命令用于设置给定target的一些属性值，类似于类对象的成员变量的值。 它们会影响到该target如何被构建的。
 set_target_properties(leveldb
   PROPERTIES VERSION ${PROJECT_VERSION} SOVERSION ${PROJECT_VERSION_MAJOR})
 
+# 该命令用于指定指定编译给定的target时，要定义的宏名称
 target_compile_definitions(leveldb
   PRIVATE
     # Used by include/export.h when building shared libraries.
@@ -277,6 +290,7 @@ if(HAVE_TCMALLOC)
   target_link_libraries(leveldb tcmalloc)
 endif(HAVE_TCMALLOC)
 
+# 查找相关的库的依赖
 # Needed by port_stdcxx.h
 find_package(Threads REQUIRED)
 target_link_libraries(leveldb Threads::Threads)
@@ -286,6 +300,7 @@ add_executable(leveldbutil
 )
 target_link_libraries(leveldbutil leveldb)
 
+# LEVELDB_BUILD_TESTS
 if(LEVELDB_BUILD_TESTS)
   enable_testing()
 
@@ -311,6 +326,7 @@ if(LEVELDB_BUILD_TESTS)
         APPEND PROPERTY COMPILE_OPTIONS -Wno-missing-field-initializers)
   endif(LEVELDB_HAVE_NO_MISSING_FIELD_INITIALIZERS)
 
+   # 提取 test_file 中的文件名，把目录和后缀都去掉
   function(leveldb_test test_file)
     get_filename_component(test_target_name "${test_file}" NAME_WE)
 
@@ -385,6 +401,7 @@ if(LEVELDB_BUILD_TESTS)
   endif(NOT BUILD_SHARED_LIBS)
 endif(LEVELDB_BUILD_TESTS)
 
+# LEVELDB_BUILD_BENCHMARKS
 if(LEVELDB_BUILD_BENCHMARKS)
   function(leveldb_benchmark bench_file)
     get_filename_component(bench_target_name "${bench_file}" NAME_WE)
@@ -444,6 +461,7 @@ int main() {
   endif(HAVE_KYOTOCABINET)
 endif(LEVELDB_BUILD_BENCHMARKS)
 
+# LEVELDB_INSTALL
 if(LEVELDB_INSTALL)
   install(TARGETS leveldb
     EXPORT leveldbTargets
