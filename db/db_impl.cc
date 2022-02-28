@@ -1182,20 +1182,25 @@ Status DBImpl::Get(const ReadOptions& options, const Slice& key,
   Status s;
   MutexLock l(&mutex_);
   SequenceNumber snapshot;
+
+  // 确定是从哪个snapshot种读取
   if (options.snapshot != nullptr) {
+    // 提供了snapshot，则从提供的snapshot中读
     snapshot =
         static_cast<const SnapshotImpl*>(options.snapshot)->sequence_number();
   } else {
+    // 否则从当前最新版本读
     snapshot = versions_->LastSequence();
   }
-
+  
+  // 增加引用计数
   MemTable* mem = mem_;
   MemTable* imm = imm_;
   Version* current = versions_->current();
   mem->Ref();
   if (imm != nullptr) imm->Ref();
   current->Ref();
-
+  
   bool have_stat_update = false;
   Version::GetStats stats;
 
@@ -1204,17 +1209,18 @@ Status DBImpl::Get(const ReadOptions& options, const Slice& key,
     mutex_.Unlock();
     // First look in the memtable, then in the immutable memtable (if any).
     LookupKey lkey(key, snapshot);
-    if (mem->Get(lkey, value, &s)) {
+    if (mem->Get(lkey, value, &s)) {  //先向memtable中查询
       // Done
-    } else if (imm != nullptr && imm->Get(lkey, value, &s)) {
+    } else if (imm != nullptr && imm->Get(lkey, value, &s)) { //再向imm查询
       // Done
-    } else {
+    } else { //最后到外存的sstables中查询
       s = current->Get(options, lkey, value, &stats);
       have_stat_update = true;
     }
     mutex_.Lock();
   }
 
+  // 更新状态，可能会触发基于seek的compaction
   if (have_stat_update && current->UpdateStats(stats)) {
     MaybeScheduleCompaction();
   }

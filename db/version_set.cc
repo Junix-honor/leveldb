@@ -282,6 +282,7 @@ void Version::ForEachOverlapping(Slice user_key, Slice internal_key, void* arg,
                                  bool (*func)(void*, int, FileMetaData*)) {
   const Comparator* ucmp = vset_->icmp_.user_comparator();
 
+  // 先在level0中search
   // Search level-0 in order from newest to oldest.
   std::vector<FileMetaData*> tmp;
   tmp.reserve(files_[0].size());
@@ -289,18 +290,22 @@ void Version::ForEachOverlapping(Slice user_key, Slice internal_key, void* arg,
     FileMetaData* f = files_[0][i];
     if (ucmp->Compare(user_key, f->smallest.user_key()) >= 0 &&
         ucmp->Compare(user_key, f->largest.user_key()) <= 0) {
+          // 找到level0的sstable，这些sstable的range 都包含了user_key.
       tmp.push_back(f);
     }
   }
   if (!tmp.empty()) {
+    // sstables按照sequence number的由大到小排序（因为seq越大，代表数据越新）
     std::sort(tmp.begin(), tmp.end(), NewestFirst);
     for (uint32_t i = 0; i < tmp.size(); i++) {
+      // 调用Match函数
       if (!(*func)(arg, 0, tmp[i])) {
         return;
       }
     }
   }
 
+  // 在其他level中查询
   // Search other levels.
   for (int level = 1; level < config::kNumLevels; level++) {
     size_t num_files = files_[level].size();
@@ -340,7 +345,7 @@ Status Version::Get(const ReadOptions& options, const LookupKey& k,
 
     static bool Match(void* arg, int level, FileMetaData* f) {
       State* state = reinterpret_cast<State*>(arg);
-
+      // 走到这个分支，说明Match函数至少已经被调用过一次，也就是说至少浪费了一次io
       if (state->stats->seek_file == nullptr &&
           state->last_file_read != nullptr) {
         // We have had more than one seek for this read.  Charge the 1st file.
@@ -351,6 +356,7 @@ Status Version::Get(const ReadOptions& options, const LookupKey& k,
       state->last_file_read = f;
       state->last_file_read_level = level;
 
+       // 从cache中获取
       state->s = state->vset->table_cache_->Get(*state->options, f->number,
                                                 f->file_size, state->ikey,
                                                 &state->saver, SaveValue);
