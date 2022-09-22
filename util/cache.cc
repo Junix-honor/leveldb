@@ -42,16 +42,16 @@ namespace {
 // are kept in a circular doubly linked list ordered by access time.
 struct LRUHandle {
   void* value;
-  void (*deleter)(const Slice&, void* value);
-  LRUHandle* next_hash;
-  LRUHandle* next;
-  LRUHandle* prev;
-  size_t charge;  // TODO(opt): Only allow uint32_t?
-  size_t key_length;
-  bool in_cache;     // Whether entry is in the cache.
-  uint32_t refs;     // References, including cache reference, if present.
-  uint32_t hash;     // Hash of key(); used for fast sharding and comparisons
-  char key_data[1];  // Beginning of key
+  void (*deleter)(const Slice&, void* value);  // 数据项被移出缓存时的回调函数
+  LRUHandle* next_hash;                        // 哈希表的链接
+  LRUHandle* next;                             // 两个双向链表的链接
+  LRUHandle* prev;                             // 两个双向链表的链接
+  size_t charge;      // 缓存项的大小// TODO(opt): Only allow uint32_t?
+  size_t key_length;  // 键的长度
+  bool in_cache;      // Whether entry is in the cache.
+  uint32_t refs;      // References, including cache reference, if present.
+  uint32_t hash;      // Hash of key(); used for fast sharding and comparisons
+  char key_data[1];   // Beginning of key
 
   Slice key() const {
     // next_ is only equal to this if the LRU handle is the list head of an
@@ -105,13 +105,17 @@ class HandleTable {
  private:
   // The table consists of an array of buckets where each bucket is
   // a linked list of cache entries that hash into the bucket.
-  uint32_t length_;
-  uint32_t elems_;
-  LRUHandle** list_;
+  uint32_t length_;   // buckets个数
+  uint32_t elems_;    // 当前插入的elem个数
+  LRUHandle** list_;  // 二级指针，每个一级指针指向一个桶
 
   // Return a pointer to slot that points to a cache entry that
   // matches key/hash.  If there is no such cache entry, return a
   // pointer to the trailing slot in the corresponding linked list.
+  // 返回的是其前驱节点 next_hash 的地址
+  // 如果节点的 hash 或者 key 匹配上，则返回该节点的双重指针（前驱节点的
+  // next_hash 指针的指针）。
+  // 否则，返回该链表的最后一个节点的双重指针（边界情况，如果是空链表，最后一个节点便是桶头）。
   LRUHandle** FindPointer(const Slice& key, uint32_t hash) {
     LRUHandle** ptr = &list_[hash & (length_ - 1)];
     while (*ptr != nullptr && ((*ptr)->hash != hash || key != (*ptr)->key())) {
@@ -121,21 +125,28 @@ class HandleTable {
   }
 
   void Resize() {
-    uint32_t new_length = 4;
+    uint32_t new_length = 4;  // 保证新容量是4的整数倍
     while (new_length < elems_) {
-      new_length *= 2;
+      new_length *= 2;  // 2倍扩容
     }
+    // 新hashtable
     LRUHandle** new_list = new LRUHandle*[new_length];
     memset(new_list, 0, sizeof(new_list[0]) * new_length);
     uint32_t count = 0;
+    // 移动旧hashtable中的元素到新hashtable
     for (uint32_t i = 0; i < length_; i++) {
       LRUHandle* h = list_[i];
       while (h != nullptr) {
         LRUHandle* next = h->next_hash;
+
+        // 如果旧hashtable的一个bucket的多个node，
+        // 都重新链接到了这个新hashtable的同一个bucket，
+        // 则这些node将会反序连接
         uint32_t hash = h->hash;
         LRUHandle** ptr = &new_list[hash & (new_length - 1)];
         h->next_hash = *ptr;
         *ptr = h;
+
         h = next;
         count++;
       }
@@ -270,6 +281,7 @@ Cache::Handle* LRUCache::Insert(const Slice& key, uint32_t hash, void* value,
                                                 void* value)) {
   MutexLock l(&mutex_);
 
+  // 解释了LRUHandle的成员变量char key_data[1];   // Beginning of key
   LRUHandle* e =
       reinterpret_cast<LRUHandle*>(malloc(sizeof(LRUHandle) - 1 + key.size()));
   e->value = value;
@@ -286,6 +298,7 @@ Cache::Handle* LRUCache::Insert(const Slice& key, uint32_t hash, void* value,
     e->in_cache = true;
     LRU_Append(&in_use_, e);
     usage_ += charge;
+    // 如果是更新，需要删除旧entry
     FinishErase(table_.Insert(e));
   } else {  // don't cache. (capacity_==0 is supported and turns off caching.)
     // next is read by key() in an assert, so it must be initialized

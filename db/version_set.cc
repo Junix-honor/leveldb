@@ -595,13 +595,15 @@ class VersionSet::Builder {
   };
 
   typedef std::set<FileMetaData*, BySmallestKey> FileSet;
+  // 表示某一Level，删除的文件和增加的文件
   struct LevelState {
     std::set<uint64_t> deleted_files;
     FileSet* added_files;
   };
 
-  VersionSet* vset_;
-  Version* base_;
+  VersionSet* vset_;  // 对应的VersionSet
+  Version* base_;     // 变化前的Version，均作为参数传入
+  // 表示每一Level删除的文件和增加的文件，VersionEdit Apply时都累积到这里 
   LevelState levels_[config::kNumLevels];
 
  public:
@@ -688,11 +690,13 @@ class VersionSet::Builder {
     }
   }
 
+  // 生成一个新版本
   // Save the current state in *v.
   void SaveTo(Version* v) {
     BySmallestKey cmp;
     cmp.internal_comparator = &vset_->icmp_;
     for (int level = 0; level < config::kNumLevels; level++) {
+      // 拿出原本Version里的文件，以及Builder里累积的，添加的文件
       // Merge the set of added files with the set of pre-existing files.
       // Drop any deleted files.  Store the result in *v.
       const std::vector<FileMetaData*>& base_files = base_->files_[level];
@@ -704,6 +708,7 @@ class VersionSet::Builder {
       // 按顺序进行合并
       for (const auto& added_file : *added_files) {
         // 找到base里面比added_file小的文件，添加到新的Version里
+        // 采用MaybeAddFile，让被删除的文件无法添加
         // Add all smaller files listed in base_
         for (std::vector<FileMetaData*>::const_iterator bpos =
                  std::upper_bound(base_iter, base_end, added_file, cmp);
@@ -713,7 +718,7 @@ class VersionSet::Builder {
 
         MaybeAddFile(v, level, added_file);
       }
-
+      // 添加剩下的文件
       // Add remaining base files
       for (; base_iter != base_end; ++base_iter) {
         MaybeAddFile(v, level, *base_iter);
@@ -800,7 +805,9 @@ void VersionSet::AppendVersion(Version* v) {
   v->next_->prev_ = v;
 }
 
+// 输入参数edit表示的是改变的内容，比如一次Compaction可以得到edit
 Status VersionSet::LogAndApply(VersionEdit* edit, port::Mutex* mu) {
+  // 设定当前的log number
   if (edit->has_log_number_) {
     assert(edit->log_number_ >= log_number_);
     assert(edit->log_number_ < next_file_number_);
@@ -812,9 +819,11 @@ Status VersionSet::LogAndApply(VersionEdit* edit, port::Mutex* mu) {
     edit->SetPrevLogNumber(prev_log_number_);
   }
 
+  // 设定当前的next_file_number和last_sequence，这些都会被持久化到MANIFEST
   edit->SetNextFile(next_file_number_);
   edit->SetLastSequence(last_sequence_);
 
+  // 创建一个新版本，新版本是current_和edit的结合
   Version* v = new Version(this);
   {
     Builder builder(this, current_);
@@ -827,6 +836,8 @@ Status VersionSet::LogAndApply(VersionEdit* edit, port::Mutex* mu) {
 
   //*Manifest 相关的内容*//
 
+  // 这里只有Open数据库的时候才会走到，如果需要保存新的MANIFEST，此时这个变量为null
+  // 会创建一个新的MANIFEST，然后将当前的状态写入
   // Initialize new descriptor log file if necessary by creating
   // a temporary file that contains a snapshot of the current version.
   std::string new_manifest_file;
@@ -877,6 +888,7 @@ Status VersionSet::LogAndApply(VersionEdit* edit, port::Mutex* mu) {
     mu->Lock();
   }
 
+  //将新版本添加到version set中
   // Install the new version
   if (s.ok()) {
     AppendVersion(v);

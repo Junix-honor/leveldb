@@ -337,12 +337,15 @@ template <typename Key, class Comparator>
 void SkipList<Key, Comparator>::Insert(const Key& key) {
   // TODO(opt): We can use a barrier-free variant of FindGreaterOrEqual()
   // here since Insert() is externally synchronized.
+  // prev存放搜索路径
   Node* prev[kMaxHeight];
+  // 设置搜索路径
   Node* x = FindGreaterOrEqual(key, prev);
 
   // Our data structure does not allow duplicate insertion
   assert(x == nullptr || !Equal(key, x->key));
 
+  // 采用随机height确定新节点能插入的最高高度
   int height = RandomHeight();
   if (height > GetMaxHeight()) {
     for (int i = GetMaxHeight(); i < height; i++) {
@@ -358,6 +361,7 @@ void SkipList<Key, Comparator>::Insert(const Key& key) {
     max_height_.store(height, std::memory_order_relaxed);
   }
 
+  // 插入新节点
   x = NewNode(key, height);
   for (int i = 0; i < height; i++) {
     // NoBarrier_SetNext() suffices since we will add a barrier when
